@@ -1,0 +1,140 @@
+name: Build APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
+jobs:
+  build_a:
+    name: Build, test and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '17.0.20.1+1'
+          check-latest: false
+          force-download: true
+      - name: Unit tests, lint and release APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace clean testDebugUnitTest lintRelease assembleRelease
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reproducibility-build-a
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+
+  build_b:
+    name: Independent reproducibility build
+    needs: build_a
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '17.0.20.1+1'
+          check-latest: false
+          force-download: true
+      - name: Build release APK on a fresh runner
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace clean assembleRelease
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reproducibility-build-a
+          path: /tmp/build-a
+      - name: Verify byte-for-byte reproducibility and checksum
+        run: |
+          cmp /tmp/build-a/app-release-unsigned.apk app/build/outputs/apk/release/app-release-unsigned.apk
+          cp app/build/outputs/apk/release/app-release-unsigned.apk app-release-unsigned.apk
+          sha256sum app-release-unsigned.apk | tee app-release-unsigned.apk.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sshlink-unsigned-apk
+          path: |
+            app-release-unsigned.apk
+            app-release-unsigned.apk.sha256
+          if-no-files-found: error
+
+  sign_release:
+    name: Sign tagged release when secrets exist
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build_b
+    runs-on: ubuntu-24.04
+    env:
+      SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+      SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+      SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+      SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+    steps:
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '17.0.20.1+1'
+          check-latest: false
+          force-download: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sshlink-unsigned-apk
+          path: dist
+      - name: Detect signing configuration
+        id: signing
+        shell: bash
+        run: |
+          if [[ -n "$SIGNING_KEYSTORE_BASE64" && -n "$SIGNING_KEY_ALIAS" && -n "$SIGNING_STORE_PASSWORD" && -n "$SIGNING_KEY_PASSWORD" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets are not configured; unsigned reproducible APK remains available."
+          fi
+      - name: Align, sign and verify APK
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 --decode > signing.jks
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          if [[ ! -x "$BUILD_TOOLS/zipalign" || ! -x "$BUILD_TOOLS/apksigner" ]]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)
+            test -n "$SDKMANAGER"
+            yes | "$SDKMANAGER" "build-tools;36.0.0" >/dev/null || true
+          fi
+          test -x "$BUILD_TOOLS/zipalign"
+          test -x "$BUILD_TOOLS/apksigner"
+          SAFE_TAG="${GITHUB_REF_NAME//\//-}"
+          OUTPUT="dist/SSHLink-${SAFE_TAG}.apk"
+          "$BUILD_TOOLS/zipalign" -P 16 -f 4 dist/app-release-unsigned.apk dist/app-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks signing.jks \
+            --ks-key-alias "$SIGNING_KEY_ALIAS" \
+            --ks-pass env:SIGNING_STORE_PASSWORD \
+            --key-pass env:SIGNING_KEY_PASSWORD \
+            --out "$OUTPUT" \
+            dist/app-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$OUTPUT"
+          sha256sum "$OUTPUT" > "$OUTPUT.sha256"
+          rm -f signing.jks dist/app-release-aligned.apk
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.signing.outputs.enabled == 'true'
+        with:
+          name: sshlink-signed-apk
+          path: |
+            dist/SSHLink-*.apk
+            dist/SSHLink-*.apk.sha256
+          if-no-files-found: error
