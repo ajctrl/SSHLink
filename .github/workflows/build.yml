@@ -77,6 +77,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build_b
     runs-on: ubuntu-24.04
+    outputs:
+      signed: ${{ steps.signing.outputs.enabled }}
     env:
       SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
       SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
@@ -138,3 +140,33 @@ jobs:
             dist/SSHLink-*.apk
             dist/SSHLink-*.apk.sha256
           if-no-files-found: error
+
+  publish_release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v') && needs.sign_release.outputs.signed == 'true'
+    needs: sign_release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sshlink-signed-apk
+          path: dist
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find dist -maxdepth 1 -type f -name '*.apk' -print -quit)
+          test -n "$APK"
+          test -f "$APK.sha256"
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$APK" "$APK.sha256" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$APK" "$APK.sha256" \
+              --title "SSHLink $GITHUB_REF_NAME" \
+              --generate-notes
+          fi

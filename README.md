@@ -173,6 +173,8 @@ of:
 base64 -w 0 sshlink-release.jks
 ```
 When a tag such as `v0.3.9` is pushed, GitHub Actions uses it as the APK's
-`versionName`, derives its Android `versionCode`, signs the APK, and creates
-a GitHub Release with the APK and its SHA-256 file. Release tags must use the
-exact `vMAJOR.MINOR.PATCH` format.
+`versionName`, derives its Android `versionCode`, signs the APK, and creates a
+GitHub Release with the APK and its SHA-256 file. Re-running the workflow for
+the same tag updates those assets. The four signing secrets must be configured
+for the Release to be published; otherwise only the unsigned workflow artifact
+is kept. Release tags must use the exact `vMAJOR.MINOR.PATCH` format.

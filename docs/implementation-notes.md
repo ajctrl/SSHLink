@@ -180,6 +180,8 @@ The GitHub Actions workflow uses two fresh runners:
 3. Runner A and B APKs are compared byte for byte.
 4. The unsigned APK and SHA-256 are published as artifacts.
 5. On a `v*` tag, a signed APK is produced only when all required signing secrets are available.
+6. When signing succeeds, the signed APK and SHA-256 are published to a GitHub Release for the tag.
+7. A tag in the form `vMAJOR.MINOR.PATCH` supplies the APK `versionName`; its Android `versionCode` is generated as `MAJOR * 1,000,000 + MINOR * 1,000 + PATCH`.
 
 The signing keystore is not stored in the repository.
 

@@ -16,6 +16,29 @@ fun signingValue(name: String): String? =
         ?.takeIf(String::isNotBlank)
         ?: keystoreProperties.getProperty(name)?.takeIf(String::isNotBlank)
 
+val defaultVersionName = "0.3.8"
+val defaultVersionCode = 11
+val githubRefType = providers.environmentVariable("GITHUB_REF_TYPE").orNull
+val githubRefName = providers.environmentVariable("GITHUB_REF_NAME").orNull
+val releaseTag = githubRefName
+    ?.let { Regex("^v(\\d+)\\.(\\d+)\\.(\\d+)$").matchEntire(it) }
+if (githubRefType == "tag" && githubRefName != null && releaseTag == null) {
+    throw GradleException("Release tags must use the vMAJOR.MINOR.PATCH format: $githubRefName")
+}
+val releaseVersionName = releaseTag?.let {
+    "${it.groupValues[1]}.${it.groupValues[2]}.${it.groupValues[3]}"
+} ?: defaultVersionName
+val releaseVersionCode = releaseTag?.let {
+    val major = it.groupValues[1].toInt()
+    val minor = it.groupValues[2].toInt()
+    val patch = it.groupValues[3].toInt()
+    val generatedCode = major.toLong() * 1_000_000 + minor * 1_000 + patch
+    require(generatedCode <= Int.MAX_VALUE) {
+        "Release tag version is too large for the generated Android versionCode: $it"
+    }
+    generatedCode.toInt()
+} ?: defaultVersionCode
+
 val signingKeystoreFile = signingValue("SIGNING_KEYSTORE_FILE")
 val signingKeyAlias = signingValue("SIGNING_KEY_ALIAS")
 val signingStorePassword = signingValue("SIGNING_STORE_PASSWORD")
@@ -45,8 +68,8 @@ android {
         applicationId = "com.example.sshlink"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.3.8"
+        versionCode = releaseVersionCode
+        versionName = releaseVersionName
     }
 
     compileOptions {
