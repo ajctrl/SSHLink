@@ -23,6 +23,8 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var targetView: TextView
     private lateinit var forwardsView: TextView
+    private lateinit var startButton: Button
+    private lateinit var stopButton: Button
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
     private val handler = Handler(Looper.getMainLooper())
@@ -80,14 +82,17 @@ class MainActivity : Activity() {
         root.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(Button(this@MainActivity).apply {
+            startButton = Button(this@MainActivity).apply {
                 text = "Start"
                 setOnClickListener { startTunnel() }
-            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(Button(this@MainActivity).apply {
+            }
+            addView(startButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            stopButton = Button(this@MainActivity).apply {
                 text = "Stop"
+                isEnabled = false
                 setOnClickListener { TunnelService.stop(this@MainActivity) }
-            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            addView(stopButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(Button(this@MainActivity).apply {
                 text = "Settings"
                 setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
@@ -174,14 +179,16 @@ class MainActivity : Activity() {
             retryBlocked = settings.isRetryBlocked(),
             retryReason = settings.retryBlockedReason(),
         )
+        startButton.isEnabled = display.status == TunnelState.Status.STOPPED ||
+            display.status == TunnelState.Status.ERROR
+        stopButton.isEnabled = display.desired || display.status != TunnelState.Status.STOPPED
         statusView.text = "Status: ${display.status.displayName} — ${display.detail}"
 
         val snapshot = TunnelState.logsSnapshot()
         if (snapshot.version != lastLogVersion) {
-            val nearBottom = logScroll.scrollY + logScroll.height >= logView.height - dp(48)
             logView.text = snapshot.entries.joinToString("\n") { it.format() }
             lastLogVersion = snapshot.version
-            if (nearBottom) logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+            logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
         }
     }
 

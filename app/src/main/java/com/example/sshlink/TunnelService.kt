@@ -536,7 +536,6 @@ class TunnelService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "SSHLink", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Persistent SSH tunnel status"
-                setShowBadge(false)
             }
         )
     }
