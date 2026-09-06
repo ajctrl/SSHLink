@@ -112,11 +112,11 @@ class SettingsActivity : Activity() {
             setOnClickListener { confirmResetAllHostKeys() }
         })
 
-        content.addView(title("Always-on operation"))
+        content.addView(title("Background operation"))
         batteryStatusView = TextView(this).apply { setPadding(0, 0, 0, dp(6)) }
         content.addView(batteryStatusView)
         content.addView(TextView(this).apply {
-            text = "Android Doze can suspend network access. This app requires battery-optimization exemption for an always-on tunnel and holds a partial wake lock only while the tunnel service is running."
+            text = "When the screen is off, SSHLink pauses connection maintenance to save battery. It checks and restores the connection when the screen turns on. Battery-optimization exemption is optional. Without it, Android may delay background recovery or interrupt the connection."
             setPadding(0, 0, 0, dp(6))
         })
         content.addView(Button(this).apply {
@@ -404,10 +404,11 @@ class SettingsActivity : Activity() {
 
     private fun refreshBatteryStatus() {
         val block = BatteryOptimizationHelper.blockingReason(this)
-        batteryStatusView.text = if (block == null) {
-            "Power policy: standard Android checks allow always-on mode"
-        } else {
-            "Power policy blocks Start: $block"
+        batteryStatusView.text = when {
+            block != null -> "Power policy blocks Start: $block"
+            !BatteryOptimizationHelper.isIgnoringOptimizations(this) ->
+                "Battery optimization enabled — exemption is optional; Start is allowed"
+            else -> "Battery optimization exemption enabled"
         }
     }
 

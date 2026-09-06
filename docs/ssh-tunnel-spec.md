@@ -95,6 +95,12 @@ Reconnect
 Recreate forwards
 ```
 
+## Battery Optimization
+
+Battery Optimization exemption is optional. When not exempt, show a warning with
+Start anyway, Power settings, and Cancel. Do not block service startup, restore,
+or reconnection solely because Battery Optimization is enabled.
+
 ## KeepAlive
 
 Supported settings:
@@ -284,7 +290,18 @@ requirements must be implemented on current Android versions.
 
 - Use TOFU pinning for SSH Host Key verification and reject Host Key changes after the first successful connection.
 - Restore a user-started tunnel after a device restart or app update only when retry has not been blocked by a terminal authentication or Host Key error.
-- Fail closed instead of silently degrading when Android Background Restricted, Battery Optimization, or Low Power Standby settings prevent reliable persistent operation, and guide the user to the relevant system setting.
+- Fail closed instead of silently degrading when Android Background Restricted or Low Power Standby settings prevent reliable persistent operation, and guide the user to the relevant system setting.
 - Restrict Local Ports to the non-privileged range available to ordinary, non-root Android apps: `1024..65535`. Continue to bind only to `127.0.0.1`.
 - Store the SSH private key in the app-internal `files/keys/` directory and exclude it from app Export and Import. On Android 12 and later, also exclude it explicitly from Cloud Backup and Device-to-Device transfer through `dataExtractionRules`.
 - Use the SSH library's default KEX configuration except for disabling `diffie-hellman-group-exchange-sha256`, which has known security concerns. Do not maintain a comprehensive application-specific KEX allow-list.
+
+## Screen-off power behavior
+
+- While the screen is off, retain an established SSH session without attempting
+  to keep it alive: release the wake lock, disable keepalive, and stop monitoring
+  and automatic reconnection. Cancel unfinished connection attempts.
+- On screen-on, begin recovery before unlock. Reuse a retained connection only
+  after an SSH reply within five seconds; reconnect on failure or network change.
+- Avoid duplicate work on unlock, and never resume a manually stopped tunnel.
+- Use network callbacks and a 30-second fallback monitor while interactive.
+- Screen-off forwarding and instantaneous readiness at unlock are not guaranteed.

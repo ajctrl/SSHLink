@@ -10,19 +10,6 @@ class AlwaysOnPowerPolicyTest {
             AlwaysOnPowerPolicy.BlockReason.BACKGROUND_RESTRICTED,
             AlwaysOnPowerPolicy.blockReason(
                 backgroundRestricted = true,
-                ignoringBatteryOptimizations = true,
-                lowPowerStandbyEnabled = false,
-                lowPowerStandbyExempt = true,
-            ),
-        )
-    }
-
-    @Test fun batteryOptimizationBlocksAlwaysOn() {
-        assertEquals(
-            AlwaysOnPowerPolicy.BlockReason.BATTERY_OPTIMIZATION,
-            AlwaysOnPowerPolicy.blockReason(
-                backgroundRestricted = false,
-                ignoringBatteryOptimizations = false,
                 lowPowerStandbyEnabled = false,
                 lowPowerStandbyExempt = true,
             ),
@@ -34,7 +21,6 @@ class AlwaysOnPowerPolicyTest {
             AlwaysOnPowerPolicy.BlockReason.LOW_POWER_STANDBY,
             AlwaysOnPowerPolicy.blockReason(
                 backgroundRestricted = false,
-                ignoringBatteryOptimizations = true,
                 lowPowerStandbyEnabled = true,
                 lowPowerStandbyExempt = false,
             ),
@@ -45,7 +31,6 @@ class AlwaysOnPowerPolicyTest {
         assertNull(
             AlwaysOnPowerPolicy.blockReason(
                 backgroundRestricted = false,
-                ignoringBatteryOptimizations = true,
                 lowPowerStandbyEnabled = true,
                 lowPowerStandbyExempt = true,
             ),

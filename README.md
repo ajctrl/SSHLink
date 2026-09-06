@@ -1,7 +1,7 @@
 # SSHLink
 
 SSHLink is an Android app for keeping SSH local port-forwarding tunnels
-running in the background.
+available in the background while the screen is on.
 
 It is useful when an Android device needs to reach services that are only
 available from an SSH server's network, such as a home-LAN web interface,
@@ -16,7 +16,7 @@ For example, an app on the Android device can connect to
 - SSH public-key authentication with Ed25519 keys
 - Multiple local port forwards
 - Automatic reconnection after transient network or SSH failures
-- Foreground-service operation while the screen is off
+- Foreground service with screen-off standby and automatic recovery on screen-on
 - SSH host-key pinning and verification
 - Configuration export and import
 - Local endpoints bound to `127.0.0.1` only
@@ -71,6 +71,18 @@ Port: 33293
 
 To add another service, create another forward with a different local port.
 
+## Screen-off standby
+
+When the screen turns off, SSHLink leaves the existing SSH connection and local
+listeners open, releases its wake lock, and pauses keepalive, monitoring, and
+reconnection. Android, the network, or the server may close the connection while
+the device sleeps; uninterrupted screen-off forwarding is not guaranteed.
+
+On screen-on, SSHLink starts recovery before unlock. If the network is unchanged,
+it checks the retained SSH connection for a server reply within five seconds and
+reuses it when possible. Otherwise it reconnects. Unlock does not duplicate an
+ongoing check or connection attempt. A manually stopped tunnel stays stopped.
+
 ## SSH server requirements
 
 The SSH server must allow public-key authentication and local forwarding.
@@ -93,7 +105,8 @@ also be able to reach each forward destination from the server.
 - SSH host keys are pinned after first use. If a pinned host key changes,
   verify the change independently before forgetting the pin in Settings.
 - Android battery-optimization restrictions can interrupt long-running
-  tunnels. SSHLink asks for the required power-settings exemption.
+  tunnels. Exemption is optional: choose **Start anyway** in the warning to
+  continue without changing system settings.
 - On Android 13 and later, notification permission may be requested when the
   tunnel starts because the tunnel runs as a foreground service.
 - Configuration backup excludes the private key and pinned SSH host keys.
@@ -103,8 +116,8 @@ also be able to reach each forward destination from the server.
 **The tunnel will not start**
 
 Confirm that the SSH settings are valid, an Ed25519 key exists, the public
-key is installed on the server, and battery optimization is disabled for
-SSHLink.
+key is installed on the server, and any blocking power restrictions shown in
+Settings are resolved. Battery Optimization exemption is optional.
 
 **The SSH connection works, but the forwarded service does not**
 

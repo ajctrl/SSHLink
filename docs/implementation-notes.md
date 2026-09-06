@@ -10,7 +10,7 @@ notes, review fixes, and validation record for the v0.3.8 implementation of
 - Ed25519 keys are generated in the app and stored as OpenSSH private key v1 files.
 - The public key can be displayed and copied. A missing or stale `.pub` file is rebuilt from the validated private key.
 - Multiple named or unnamed `127.0.0.1:localPort -> remoteHost:remotePort` local forwards are supported.
-- `ServerAliveInterval` and `ServerAliveCountMax` are configurable.
+- `ServerAliveInterval` (default: 120 seconds) and `ServerAliveCountMax` are configurable.
 - Only positively identified transient network failures trigger exponential-backoff reconnection.
 - Authentication failures, Host Key changes, invalid keys, bind failures, and unclassified failures stop automatically as terminal errors.
 - Android default-network changes invalidate the current connection and trigger SSH reconnection and DNS resolution.
@@ -30,7 +30,7 @@ notes, review fixes, and validation record for the v0.3.8 implementation of
 | Private-key storage | App-internal `filesDir/keys`; excluded from Android backup and device transfer |
 | Multiple forwards | Persisted list; every forward is recreated after reconnect |
 | Foreground operation | `TunnelService` with the `specialUse` FGS type |
-| Always-on behavior | Power-policy prerequisites, a service-scoped partial wake lock, and runtime policy checks |
+| Screen-aware operation | Screen-off standby, screen-on SSH response verification, and interactive-only maintenance |
 | Reconnection | Disconnect monitoring and retryable-only exponential backoff |
 | Network changes | Default-network callback, generation invalidation, and reconnection |
 | SSH DNS | Active Android `Network.getAllByName()` on each new SSH connection |
@@ -97,15 +97,35 @@ settings.
 
 Before Start, the app requires:
 
-- the app not to be in Android's Background Restricted state;
-- Battery Optimization exclusion; and
+- the app not to be in Android's Background Restricted state; and
 - on Android 13 and later, Low Power Standby allowance when that feature is enabled.
 
-`TunnelService` holds a `PARTIAL_WAKE_LOCK` only while running. Screen on/off and
-power-save-mode signals trigger policy re-evaluation, with a five-second fallback
-poll for settings and OEM changes that do not emit an accessible broadcast. If a
-standard Android policy becomes incompatible with an always-on socket, the
-service enters ERROR instead of silently remaining disconnected.
+Battery Optimization exemption is optional. Start shows an advisory with
+**Start anyway**, **Power settings**, and **Cancel** when not exempt. The service
+does not block startup, restoration, or runtime recovery solely because Battery
+Optimization is enabled. Existing retry blocks from an older version can be
+cleared by pressing Start.
+
+`TunnelService` holds a `PARTIAL_WAKE_LOCK` only while the requested tunnel is
+running and the device is interactive. Screen-off cancels retries and monitoring,
+invalidates unfinished handshakes, disables SSH keepalive, and releases the lock.
+An established session and its local listeners remain open, but may expire while
+Android sleeps. Boot/sticky restore while non-interactive waits for screen-on.
+
+Screen-on checks the network and the retained session. A changed network or a
+closed session triggers reconnection; otherwise a keepalive global request must
+receive an SSH success/failure reply within five seconds. Both reply types prove
+server responsiveness. `ScreenAwareSession` wraps JSch 2.28.7's package-private
+packet reader for this purpose; its packet-reader tests must pass on upgrades.
+Socket writes and handshakes run separately from the timeout scheduler so a stuck
+write cannot prevent the response deadline. Late replies are scoped to the screen
+epoch and session. Unlock does not duplicate an in-progress probe or handshake.
+
+The interactive-only fallback monitor runs every 30 seconds; default-network
+callbacks remain the primary network-change signal. Network callbacks update the
+snapshot without reconnecting while non-interactive. Existing startup power-policy
+prerequisites remain; runtime power-policy checks are paused while screen-off and
+resume at screen-on. Manual Stop and terminal failures prevent automatic resume.
 
 The service is `START_STICKY`. `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED` restore
 a user-requested tunnel only when durable retry blocking is absent. Android may
@@ -210,8 +230,10 @@ generated from a partial or untrusted dependency resolution.
 
 - SSH policy values and KEX filtering.
 - Foreground promotion before power-policy validation.
-- Battery Optimization fail-closed behavior.
-- Partial wake-lock acquisition and release.
+- Optional Battery Optimization warning, continue/cancel actions, and service
+  startup and screen-on recovery without exemption.
+- Partial wake-lock acquisition/release, screen-off session retention, wake response
+  verification, silent-peer timeout, stale replies, and Stop during standby.
 - Stop and sticky restart behavior.
 - Boot restoration gates and terminal retry blocking.
 - Background Restricted policy behavior.

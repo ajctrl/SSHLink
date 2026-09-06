@@ -36,6 +36,14 @@ class ConnectionGenerationState<T : Any> {
         Invalidated(generation, detachLocked())
     }
 
+    /** Cancel handshakes/retries while leaving the established connection owned. */
+    fun suspendInFlight(): Invalidated<T> = synchronized(lock) {
+        generation += 1
+        val old = inFlight
+        inFlight = null
+        Invalidated(generation, listOfNotNull(old))
+    }
+
     fun isCurrent(candidateGeneration: Long): Boolean = synchronized(lock) {
         candidateGeneration == generation
     }

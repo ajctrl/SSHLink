@@ -25,6 +25,24 @@ class ConnectionGenerationStateTest {
         assertTrue(state.registerInFlight(invalidated.generation, second))
     }
 
+    @Test fun screenOffInvalidatesHandshakeButRetainsEstablishedSession() {
+        val state = ConnectionGenerationState<FakeConnection>()
+        val session = FakeConnection("active")
+        val gen = state.nextGeneration().generation
+        assertTrue(state.registerInFlight(gen, session))
+        assertTrue(state.promote(gen, session))
+        val handshake = FakeConnection("handshake")
+        assertTrue(state.registerInFlight(gen, handshake))
+
+        val suspended = state.suspendInFlight()
+
+        assertEquals(listOf(handshake), suspended.connections)
+        assertSame(session, state.active())
+        assertFalse(state.isCurrent(gen))
+        assertFalse(state.promote(gen, handshake))
+        assertFalse(state.runIfInFlight(gen, handshake) { error("Stale trust commit") })
+    }
+
     @Test fun obsoleteGenerationCannotRegisterPromoteOrMutateTrust() {
         val state = ConnectionGenerationState<FakeConnection>()
         val oldGen = state.nextGeneration().generation

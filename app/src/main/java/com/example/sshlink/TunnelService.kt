@@ -16,19 +16,20 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import com.jcraft.jsch.JSch
-import com.jcraft.jsch.Session
+import com.jcraft.jsch.ScreenAwareSession
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 class TunnelService : Service() {
     private val executor = Executors.newSingleThreadScheduledExecutor()
+    private val connectionExecutor = Executors.newCachedThreadPool()
     private val lock = Any()
     private lateinit var settings: SettingsRepository
     private lateinit var keys: OpenSshEd25519KeyManager
     private lateinit var connectivity: ConnectivityManager
 
-    private val connections = ConnectionGenerationState<Session>()
+    private val connections = ConnectionGenerationState<ScreenAwareSession>()
     @Volatile private var currentNetwork: Network? = null
     private val reconnectBackoff = ReconnectBackoffState()
     @Volatile private var runtimeRetryBlocked = false
@@ -37,13 +38,21 @@ class TunnelService : Service() {
     private var monitorFuture: ScheduledFuture<*>? = null
     private var callbackRegistered = false
     private var powerSignalReceiverRegistered = false
+    @Volatile private var screenInteractive = false
+    @Volatile private var destroyed = false
+    private var sessionNetwork: Network? = null
+    private var keepAliveIntervalMs = 0
+    private var probeFuture: ScheduledFuture<*>? = null
+    private var probeSession: ScreenAwareSession? = null
+    private var screenEpoch = 0L
 
     private val powerSignalReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
             when (action) {
-                Intent.ACTION_SCREEN_OFF,
+                Intent.ACTION_SCREEN_OFF -> updateScreenState(false)
                 Intent.ACTION_SCREEN_ON,
+                Intent.ACTION_USER_PRESENT -> updateScreenState(true)
                 PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> runCatching {
                     executor.execute { reevaluatePowerPolicy("power state changed: $action") }
                 }
@@ -86,6 +95,7 @@ class TunnelService : Service() {
         connectivity = getSystemService(ConnectivityManager::class.java)
         currentNetwork = connectivity.activeNetwork
         runtimeRetryBlocked = settings.isRetryBlocked()
+        screenInteractive = getSystemService(PowerManager::class.java).isInteractive
         configureJschForAndroid()
         createNotificationChannel()
     }
@@ -170,13 +180,16 @@ class TunnelService : Service() {
     }
 
     override fun onDestroy() {
+        synchronized(lock) { destroyed = true }
         unregisterNetworkCallback()
         unregisterPowerSignalReceiver()
         reconnectFuture?.cancel(true)
         monitorFuture?.cancel(true)
         disconnectInvalidated(connections.invalidateAll())
         releaseWakeLock()
+        cancelProbe()
         executor.shutdownNow()
+        connectionExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -186,25 +199,122 @@ class TunnelService : Service() {
             powerPolicyFailure(reason)
             return
         }
-        acquireWakeLock()
         registerNetworkCallback()
         registerPowerSignalReceiver()
-        if (monitorFuture == null || monitorFuture?.isCancelled == true || monitorFuture?.isDone == true) {
-            monitorFuture = executor.scheduleAtFixedRate({ monitorConnection() }, 5, 5, TimeUnit.SECONDS)
+        synchronized(lock) {
+            screenInteractive = getSystemService(PowerManager::class.java).isInteractive
+            if (screenInteractive) {
+                startMaintenance()
+                requestReconnect(reason, 0)
+            } else {
+                // Explicit settings changes invalidate old forwards even while asleep.
+                disconnectInvalidated(connections.invalidateAll())
+                pauseMaintenance()
+            }
         }
-        requestReconnect(reason, 0)
+    }
+
+    private fun startMaintenance() {
+        acquireWakeLock()
+        if (monitorFuture == null || monitorFuture?.isCancelled == true || monitorFuture?.isDone == true) {
+            monitorFuture = executor.scheduleWithFixedDelay({ monitorConnection() }, 30, 30, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun cancelProbe() {
+        probeFuture?.cancel(false)
+        probeFuture = null
+        probeSession?.cancelProbe()
+        probeSession = null
+    }
+
+    private fun pauseMaintenance() {
+        screenEpoch += 1
+        reconnectFuture?.cancel(false)
+        reconnectFuture = null
+        monitorFuture?.cancel(false)
+        monitorFuture = null
+        cancelProbe()
+        // Invalidate handshakes, but retain an established session and its listeners.
+        val invalidated = connections.suspendInFlight()
+        invalidated.connections.forEach { runCatching { it.disconnect() } }
+        runCatching { connections.active()?.pauseMaintenance() }
+        releaseWakeLock()
+        setState(TunnelState.Status.PAUSED, "Screen off — connection retained if available")
+    }
+
+    private fun updateScreenState(interactive: Boolean): Unit = synchronized(lock) {
+        if (destroyed || !TunnelState.desiredRunning || runtimeRetryBlocked) return@synchronized
+        val changed = screenInteractive != interactive
+        screenInteractive = interactive
+        if (!interactive) {
+            if (changed) pauseMaintenance()
+            return@synchronized
+        }
+        if (!reevaluatePowerPolicy("screen on")) return@synchronized
+        startMaintenance()
+        // USER_PRESENT must not duplicate SCREEN_ON's probe or handshake.
+        if (!changed && (probeSession != null ||
+                TunnelState.status == TunnelState.Status.CONNECTING ||
+                (TunnelState.status == TunnelState.Status.CONNECTED && connections.active()?.isConnected == true))) return@synchronized
+        val session = connections.active()
+        if (session == null || !session.isConnected || sessionNetwork != connectivity.activeNetwork) {
+            requestReconnect("screen on", 0)
+            return@synchronized
+        }
+        currentNetwork = connectivity.activeNetwork
+        val epoch = screenEpoch
+        probeSession = session
+        setState(TunnelState.Status.CONNECTING, "Checking SSH connection")
+        probeFuture = executor.schedule({
+            synchronized(lock) {
+                if (probeSession === session && screenEpoch == epoch && shouldAutomaticallyReconnect()) {
+                    requestReconnect("SSH response timed out", 0)
+                }
+            }
+        }, 5, TimeUnit.SECONDS)
+        try {
+            session.resumeMaintenance(keepAliveIntervalMs)
+            session.prepareProbe {
+                synchronized(lock) {
+                    if (probeSession === session && screenEpoch == epoch && shouldAutomaticallyReconnect()) {
+                        cancelProbe()
+                        setState(TunnelState.Status.CONNECTED, "Connected")
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            requestReconnect("SSH maintenance resume failed", 0)
+            return@synchronized
+        }
+        // Socket writes can block. Keep the deadline and screen-off handling independent.
+        connectionExecutor.execute {
+            try {
+                synchronized(lock) {
+                    if (probeSession !== session || screenEpoch != epoch || !screenInteractive) return@execute
+                }
+                session.sendKeepAliveMsg()
+            } catch (_: Exception) {
+                synchronized(lock) {
+                    if (probeSession === session && screenEpoch == epoch && shouldAutomaticallyReconnect()) {
+                        requestReconnect("SSH response check failed", 0)
+                    }
+                }
+            }
+        }
     }
 
     private fun shouldAutomaticallyReconnect(): Boolean =
-        TunnelLifecyclePolicy.shouldAutomaticallyReconnect(
+        !destroyed && screenInteractive && TunnelLifecyclePolicy.shouldAutomaticallyReconnect(
             desired = TunnelState.desiredRunning,
             retryBlocked = runtimeRetryBlocked,
             statusIsError = TunnelState.status == TunnelState.Status.ERROR,
         )
 
-    private fun requestReconnect(reason: String, delayMs: Long) {
+    private fun requestReconnect(reason: String, delayMs: Long): Unit = synchronized(lock) {
         val invalidated = synchronized(lock) {
-            if (!TunnelState.desiredRunning || runtimeRetryBlocked) return
+            if (destroyed || !screenInteractive || !TunnelState.desiredRunning || runtimeRetryBlocked) return
+            cancelProbe()
             reconnectFuture?.cancel(false)
             reconnectFuture = null
             // A new network/explicit reconnect is a new failure domain; keep
@@ -215,7 +325,7 @@ class TunnelService : Service() {
         disconnectInvalidated(invalidated)
         if (!isCurrent(invalidated.generation)) return
         setState(TunnelState.Status.CONNECTING, "Reconnecting: $reason")
-        val scheduled = executor.schedule({ connect(invalidated.generation) }, delayMs, TimeUnit.MILLISECONDS)
+        val scheduled = executor.schedule({ connectionExecutor.execute { connect(invalidated.generation) } }, delayMs, TimeUnit.MILLISECONDS)
         synchronized(lock) {
             if (isCurrent(invalidated.generation)) reconnectFuture = scheduled else scheduled.cancel(false)
         }
@@ -251,14 +361,17 @@ class TunnelService : Service() {
         }
         val alias = SshHostAlias.canonical(connectionHost, config.ssh.port)
 
-        setState(TunnelState.Status.CONNECTING, "Connecting to ${config.ssh.host}:${config.ssh.port}")
+        synchronized(lock) {
+            if (!isCurrent(gen)) return
+            setState(TunnelState.Status.CONNECTING, "Connecting to ${config.ssh.host}:${config.ssh.port}")
+        }
         TunnelState.log(
             "INFO",
             "SSH connect start: ${config.ssh.username}@${config.ssh.host}:${config.ssh.port}",
             config.app.logLimit,
         )
 
-        var newSession: Session? = null
+        var newSession: ScreenAwareSession? = null
         val connectionHostKeys = PinnedHostKeyRepository(
             this,
             onPinned = { host, fp -> TunnelState.log("INFO", "Pinned SSH host key for $host ($fp)") },
@@ -274,13 +387,13 @@ class TunnelService : Service() {
             val network = synchronized(lock) {
                 connectivity.activeNetwork.also { currentNetwork = it }
             }
-            val candidate = jsch.getSession(config.ssh.username, connectionHost, config.ssh.port).apply {
+            val candidate = ScreenAwareSession(jsch, config.ssh.username, connectionHost, config.ssh.port).apply {
                 SshSessionPolicy.apply(this)
                 setHostKeyAlias(alias)
                 setServerAliveInterval(config.ssh.keepAliveIntervalSec * 1000)
                 setServerAliveCountMax(config.ssh.keepAliveCountMax)
                 setSocketFactory(
-                    AndroidNetworkSocketFactory(network, CONNECT_TIMEOUT_MS) { addresses ->
+                    AndroidNetworkSocketFactory(network, CONNECT_TIMEOUT_MS, onCreated = ::trackSocket) { addresses ->
                         TunnelState.log(
                             "INFO",
                             "DNS ${config.ssh.host} -> ${addresses.joinToString()}",
@@ -290,9 +403,11 @@ class TunnelService : Service() {
                 )
             }
             newSession = candidate
-            if (!connections.registerInFlight(gen, candidate) || !isCurrent(gen)) {
-                candidate.disconnect()
-                return
+            synchronized(lock) {
+                if (!isCurrent(gen) || !connections.registerInFlight(gen, candidate)) {
+                    candidate.disconnect()
+                    return
+                }
             }
             candidate.connect(CONNECT_TIMEOUT_MS)
 
@@ -322,15 +437,19 @@ class TunnelService : Service() {
                 "${name}127.0.0.1:${forward.localPort} -> ${forward.remoteHost}:${forward.remotePort}"
             }
 
-            if (!isCurrent(gen) || !connections.promote(gen, candidate)) {
-                candidate.disconnect()
-                return
+            synchronized(lock) {
+                if (!isCurrent(gen) || !connections.promote(gen, candidate)) {
+                    candidate.disconnect()
+                    return
+                }
+                sessionNetwork = network
+                keepAliveIntervalMs = config.ssh.keepAliveIntervalSec * 1000
+                reconnectBackoff.reset()
+                TunnelState.setActiveForwards(active)
+                active.forEach { TunnelState.log("INFO", "Forward active: $it", config.app.logLimit) }
+                setState(TunnelState.Status.CONNECTED, "Connected")
+                TunnelState.log("INFO", "SSH connected", config.app.logLimit)
             }
-            reconnectBackoff.reset()
-            TunnelState.setActiveForwards(active)
-            active.forEach { TunnelState.log("INFO", "Forward active: $it", config.app.logLimit) }
-            setState(TunnelState.Status.CONNECTED, "Connected")
-            TunnelState.log("INFO", "SSH connected", config.app.logLimit)
         } catch (e: Exception) {
             connectionHostKeys.discardPending()
             newSession?.let { connections.clear(it) }
@@ -347,19 +466,19 @@ class TunnelService : Service() {
         }
     }
 
-    private fun scheduleRetry(gen: Long, reason: String, logLimit: Int = 500) {
+    private fun scheduleRetry(gen: Long, reason: String, logLimit: Int = 500): Unit = synchronized(lock) {
         if (!isCurrent(gen)) return
         val attempt = reconnectBackoff.nextAttempt()
         val seconds = ReconnectPolicy.retryDelaySeconds(attempt)
         setState(TunnelState.Status.RECONNECT_WAIT, "Retry in ${seconds}s: $reason")
         TunnelState.log("INFO", "Reconnect scheduled in ${seconds}s", logLimit)
-        val scheduled = executor.schedule({ connect(gen) }, seconds, TimeUnit.SECONDS)
+        val scheduled = executor.schedule({ connectionExecutor.execute { connect(gen) } }, seconds, TimeUnit.SECONDS)
         synchronized(lock) {
             if (isCurrent(gen)) reconnectFuture = scheduled else scheduled.cancel(false)
         }
     }
 
-    private fun monitorConnection() {
+    private fun monitorConnection(): Unit = synchronized(lock) {
         if (!shouldAutomaticallyReconnect()) return
         if (!reevaluatePowerPolicy("periodic power-policy check")) return
         if (!callbackRegistered) {
@@ -382,14 +501,14 @@ class TunnelService : Service() {
         }
     }
 
-    private fun reevaluatePowerPolicy(trigger: String): Boolean {
+    private fun reevaluatePowerPolicy(trigger: String): Boolean = synchronized(lock) {
         if (!shouldAutomaticallyReconnect()) return false
         val reason = BatteryOptimizationHelper.blockingReason(this) ?: return true
         powerPolicyFailure("Power policy changed while the tunnel was running ($trigger): $reason")
         return false
     }
 
-    private fun powerPolicyFailure(message: String) {
+    private fun powerPolicyFailure(message: String): Unit = synchronized(lock) {
         val invalidated = synchronized(lock) {
             if (runtimeRetryBlocked) return
             runtimeRetryBlocked = true
@@ -410,7 +529,8 @@ class TunnelService : Service() {
         stopSelf()
     }
 
-    private fun terminalFailure(gen: Long, message: String, logLimit: Int = 500) {
+    private fun terminalFailure(gen: Long, message: String, logLimit: Int = 500): Unit = synchronized(lock) {
+        if (!isCurrent(gen)) return
         val invalidated = synchronized(lock) {
             if (!TunnelState.desiredRunning || runtimeRetryBlocked) return
             val result = connections.invalidateIfCurrent(gen) ?: return
@@ -434,7 +554,7 @@ class TunnelService : Service() {
         stopSelf()
     }
 
-    private fun stopTunnel(clearDesired: Boolean) {
+    private fun stopTunnel(clearDesired: Boolean): Unit = synchronized(lock) {
         if (clearDesired) {
             settings.setTunnelDesired(false)
             settings.setRetryBlocked(false)
@@ -459,13 +579,14 @@ class TunnelService : Service() {
         stopSelf()
     }
 
-    private fun disconnectInvalidated(invalidated: ConnectionGenerationState.Invalidated<Session>) {
+    private fun disconnectInvalidated(invalidated: ConnectionGenerationState.Invalidated<ScreenAwareSession>) {
+        cancelProbe()
         invalidated.connections.forEach { connection -> runCatching { connection.disconnect() } }
         TunnelState.setActiveForwards(emptyList())
     }
 
     private fun isCurrent(gen: Long): Boolean =
-        TunnelState.desiredRunning && !runtimeRetryBlocked && connections.isCurrent(gen)
+        !destroyed && screenInteractive && TunnelState.desiredRunning && !runtimeRetryBlocked && connections.isCurrent(gen)
 
     private fun registerNetworkCallback() {
         if (callbackRegistered) return
@@ -489,6 +610,7 @@ class TunnelService : Service() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
             addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
         }
         try {

@@ -13,6 +13,7 @@ import java.net.UnknownHostException
 class AndroidNetworkSocketFactory(
     private val network: Network?,
     private val connectTimeoutMs: Int,
+    private val onCreated: (Socket) -> Unit = {},
     private val onResolved: (List<String>) -> Unit,
 ) : SocketFactory {
     override fun createSocket(host: String, port: Int): Socket {
@@ -24,6 +25,7 @@ class AndroidNetworkSocketFactory(
         for (address in addresses) {
             val socket = Socket()
             try {
+                onCreated(socket)
                 network?.bindSocket(socket)
                 socket.connect(InetSocketAddress(address, port), connectTimeoutMs)
                 socket.tcpNoDelay = true

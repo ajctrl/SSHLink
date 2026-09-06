@@ -8,7 +8,7 @@ data class SshConfig(
     val port: Int = 22,
     val username: String = "",
     val keyId: String = "default",
-    val keepAliveIntervalSec: Int = 30,
+    val keepAliveIntervalSec: Int = 120,
     val keepAliveCountMax: Int = 3,
 )
 
@@ -104,7 +104,7 @@ data class AppConfig(
                 port = sshObj.optInt("port", 22),
                 username = sshObj.optString("username", ""),
                 keyId = sshObj.optString("keyId", "default"),
-                keepAliveIntervalSec = sshObj.optInt("keepAliveIntervalSec", 30),
+                keepAliveIntervalSec = sshObj.optInt("keepAliveIntervalSec", 120),
                 keepAliveCountMax = sshObj.optInt("keepAliveCountMax", 3),
             )
 

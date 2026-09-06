@@ -141,9 +141,23 @@ class MainActivity : Activity() {
         val powerBlock = BatteryOptimizationHelper.blockingReason(this)
         if (powerBlock != null) {
             AlertDialog.Builder(this)
-                .setTitle("Power settings block always-on mode")
+                .setTitle("Power settings block background operation")
                 .setMessage("$powerBlock\n\nOpen system power settings, remove the restriction, then press Start again.")
                 .setPositiveButton("Power settings") { _, _ -> BatteryOptimizationHelper.openRelevantSettings(this) }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        requestStartWithBatteryWarning()
+    }
+
+    private fun requestStartWithBatteryWarning() {
+        if (!BatteryOptimizationHelper.isIgnoringOptimizations(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("Battery optimization is enabled")
+                .setMessage("You can start without an exemption. Android may delay background recovery or interrupt the connection. You can change this later in power settings.")
+                .setPositiveButton("Start anyway") { _, _ -> requestNotificationPermissionThenStart() }
+                .setNeutralButton("Power settings") { _, _ -> BatteryOptimizationHelper.openRelevantSettings(this) }
                 .setNegativeButton("Cancel", null)
                 .show()
             return

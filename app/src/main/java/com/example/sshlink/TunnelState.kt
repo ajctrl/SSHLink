@@ -10,6 +10,7 @@ object TunnelState {
         STOPPED("Stopped"),
         CONNECTING("Connecting"),
         CONNECTED("Connected"),
+        PAUSED("Screen-off standby"),
         RECONNECT_WAIT("Reconnecting"),
         ERROR("Connection error"),
     }

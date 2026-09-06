@@ -9,7 +9,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 
-/** Standard Android power-policy checks required by the app's always-on contract. */
+/** Blocking power restrictions and optional battery-optimization guidance. */
 object BatteryOptimizationHelper {
     fun isIgnoringOptimizations(context: Context): Boolean {
         val power = context.getSystemService(PowerManager::class.java)
@@ -21,7 +21,7 @@ object BatteryOptimizationHelper {
             context.getSystemService(ActivityManager::class.java).isBackgroundRestricted
 
     /**
-     * Null means standard Android power policy allows an always-on socket/wake lock.
+     * Null means there is no blocking power restriction. Battery optimization is advisory.
      * OEM-specific restrictions can still exist and must be covered by device testing.
      */
     fun blockingReason(context: Context): String? {
@@ -33,14 +33,11 @@ object BatteryOptimizationHelper {
             (Build.VERSION.SDK_INT >= 34 && power.isExemptFromLowPowerStandby)
         return when (AlwaysOnPowerPolicy.blockReason(
             backgroundRestricted = isBackgroundRestricted(context),
-            ignoringBatteryOptimizations = power.isIgnoringBatteryOptimizations(context.packageName),
             lowPowerStandbyEnabled = lowPowerStandbyEnabled,
             lowPowerStandbyExempt = lowPowerStandbyExempt,
         )) {
             AlwaysOnPowerPolicy.BlockReason.BACKGROUND_RESTRICTED ->
                 "Background usage is Restricted. Android can prevent foreground-service start/continuation and reboot restore while the app is in the background."
-            AlwaysOnPowerPolicy.BlockReason.BATTERY_OPTIMIZATION ->
-                "Battery optimization is active. Android Doze can suspend network access and ignore wake locks."
             AlwaysOnPowerPolicy.BlockReason.LOW_POWER_STANDBY ->
                 "Low Power Standby is enabled and this app is not known to be exempt. Android disables network access and ignores wake locks while the device is non-interactive."
             null -> null
