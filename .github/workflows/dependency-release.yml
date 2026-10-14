@@ -28,6 +28,7 @@ jobs:
     concurrency:
       group: dependency-release
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
       pull-requests: write

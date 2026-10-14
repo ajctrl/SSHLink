@@ -6,11 +6,15 @@ updates:
       interval: cron
       cronjob: '0 4 * * *'
       timezone: Asia/Tokyo
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 3
     commit-message:
       prefix: 'build(deps)'
     groups:
-      gradle-dependencies:
+      build-tools:
+        patterns: ['com.android.*']
+      test-libraries:
+        patterns: ['junit:*', 'org.json:*', 'org.robolectric:*']
+      app-libraries:
         patterns: ['*']
       gradle-security:
         applies-to: security-updates

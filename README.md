@@ -195,8 +195,10 @@ is kept. Release tags must use the exact `vMAJOR.MINOR.PATCH` format.
 ### Automatic dependency releases
 
 Dependabot checks the Gradle dependencies every day at 04:00 Asia/Tokyo and
-groups available updates into a pull request. This includes application and test
-libraries and the Android Gradle plugin, including major version updates.
+creates separate grouped pull requests for application libraries, test libraries
+and Android build plugins, including major version updates. A build-plugin
+update requiring a newer Gradle version therefore does not block application
+library updates. Successful updates are queued for sequential merging and tagging.
 Security updates have a separate group; enable Dependabot security updates in
 the repository settings to receive them between scheduled version checks.
 The custom Gradle bootstrap, Java, Android SDK and GitHub Actions versions are
