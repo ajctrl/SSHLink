@@ -16,8 +16,8 @@ fun signingValue(name: String): String? =
         ?.takeIf(String::isNotBlank)
         ?: keystoreProperties.getProperty(name)?.takeIf(String::isNotBlank)
 
-val defaultVersionName = "0.3.8"
-val defaultVersionCode = 11
+val defaultVersionName = "0.3.11"
+val defaultVersionCode = 3011
 val githubRefType = providers.environmentVariable("GITHUB_REF_TYPE").orNull
 val githubRefName = providers.environmentVariable("GITHUB_REF_NAME").orNull
 val releaseTag = githubRefName
