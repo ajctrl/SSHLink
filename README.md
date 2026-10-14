@@ -191,3 +191,43 @@ GitHub Release with the APK and its SHA-256 file. Re-running the workflow for
 the same tag updates those assets. The four signing secrets must be configured
 for the Release to be published; otherwise only the unsigned workflow artifact
 is kept. Release tags must use the exact `vMAJOR.MINOR.PATCH` format.
+
+### Automatic dependency releases
+
+Dependabot checks the Gradle dependencies every day at 04:00 Asia/Tokyo and
+groups available updates into a pull request. This includes application and test
+libraries and the Android Gradle plugin, including major version updates.
+Security updates have a separate group; enable Dependabot security updates in
+the repository settings to receive them between scheduled version checks.
+The custom Gradle bootstrap, Java, Android SDK and GitHub Actions versions are
+not managed by this configuration.
+
+After **Build APK** passes unit tests, lint, automation tests and the independent
+APK reproducibility check, **Release dependency updates** automatically:
+
+1. Verifies that the PR is from Dependabot in this repository, still matches the
+   tested commit, and only changes the existing Gradle dependency files.
+2. Merges it into the default branch using an enabled merge method. Repository
+   protection rules still apply; required human approvals can block automation.
+3. Creates the next patch tag above both existing stable tags and the merged
+   commit's `defaultVersionName` (for example, `0.3.11` becomes `v0.3.12`).
+4. Explicitly dispatches **Build APK** on that tag. The tagged commit is tested
+   and built twice again before the signed APK and checksum are published.
+
+All four signing secrets listed above are required before automatic merging.
+The automation uses `GITHUB_TOKEN`; no personal access token is needed. The
+repository must permit the workflow's contents, pull-request and Actions write
+permissions. Tag rules must allow the workflow to create release tags.
+The privileged workflow runs only default-branch automation code and never
+checks out the dependency PR. The release version comes from the tag; the
+local-build fallback version is not changed by each automatic release.
+
+If merging or dispatching fails, rerun **Release dependency updates**, or run it
+manually with the successful PR **Build APK** run's numeric ID as `build_run_id`.
+Retries reuse the merged commit and its existing release tag. If the tagged
+build or publishing fails, rerun **Build APK** for that tag. Failed validation
+leaves the dependency PR unmerged; failed release builds do not publish an APK.
+
+The explicit dispatch is necessary because a tag created with `GITHUB_TOKEN`
+does not trigger a push workflow; see GitHub's
+[workflow trigger documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
