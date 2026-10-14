@@ -120,10 +120,10 @@ android {
 }
 
 dependencies {
-    implementation("com.github.mwiede:jsch:2.28.7")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.85.2")
+    implementation("com.github.mwiede:jsch:2.28.8")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20250517")
-    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("org.json:json:20260814")
+    testImplementation("org.robolectric:robolectric:4.17")
 }
