@@ -16,7 +16,10 @@ class SettingsRepository(context: Context) {
     @Throws(ConfigStore.ConfigCorruptedException::class)
     fun exportJson(): String = store.exportJson()
 
-    fun importJson(text: String): AppConfig = store.importJson(text)
+    fun configRevision(): ConfigStore.Revision = store.revision()
+
+    fun importJson(text: String, expectedRevision: ConfigStore.Revision? = null): AppConfig =
+        store.importJson(text, expectedRevision)
 
     fun isTunnelDesired(): Boolean = runtimePrefs.getBoolean("tunnelDesired", false)
 

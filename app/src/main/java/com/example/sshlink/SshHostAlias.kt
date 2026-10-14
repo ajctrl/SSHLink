@@ -91,11 +91,15 @@ object SshHostAlias {
     }
 
     private fun normalizeDnsOrIpv4(value: String): String {
+        // IDN maps Unicode digits and separators to ASCII. Validate the mapped
+        // value so normalization cannot turn an accepted name into invalid IPv4.
+        val ascii = IDN.toASCII(value, IDN.USE_STD3_ASCII_RULES).lowercase().trimEnd('.')
+        require(ascii.isNotEmpty()) { "SSH host is required" }
         // Reject ambiguous legacy numeric IPv4 forms such as 2130706433, 127.1,
         // and octets with leading zeroes. They may be interpreted differently by
         // resolver implementations and must not create alternate host-key identities.
-        if (value.all { it.isDigit() || it == '.' }) {
-            val parts = value.split('.')
+        if (ascii.all { it in '0'..'9' || it == '.' }) {
+            val parts = ascii.split('.')
             require(parts.size == 4) { "IPv4 address must use four dotted-decimal octets" }
             require(parts.all { part ->
                 part.isNotEmpty() &&
@@ -105,7 +109,6 @@ object SshHostAlias {
             return parts.joinToString(".")
         }
 
-        val ascii = IDN.toASCII(value, IDN.USE_STD3_ASCII_RULES).lowercase()
         require(ascii.length <= 253) { "SSH host name is too long" }
         val labels = ascii.split('.')
         require(labels.all { label ->

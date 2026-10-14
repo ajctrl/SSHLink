@@ -5,6 +5,29 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class SshHostAliasTest {
+    @Test fun idnMappingCannotBypassIpv4Validation() {
+        listOf("127\u30021", "127\uff0e0\uff0e0\uff0e01", "999\uff610\uff610\uff611",
+            "\uff11\uff12\uff17.\uff10.\uff10.\uff10\uff11").forEach { host ->
+            assertThrows(host, IllegalArgumentException::class.java) {
+                SshHostAlias.canonicalHost(host)
+            }
+            org.junit.Assert.assertFalse(AppConfig(ssh = SshConfig(host, username = "alice"))
+                .validationErrors().isEmpty())
+        }
+    }
+
+    @Test fun unicodeHostsNormalizeIdempotently() {
+        mapOf(
+            "127\u30020\u30020\u30021" to "127.0.0.1",
+            "\uff11\uff12\uff17.\uff10.\uff10.\uff11" to "127.0.0.1",
+            "SSH\uff0eEXAMPLE\uff61COM\u3002" to "ssh.example.com",
+        ).forEach { (input, expected) ->
+            assertEquals(expected, SshHostAlias.canonicalHost(input))
+            assertEquals(expected, SshHostAlias.canonicalHost(expected))
+            assertEquals(SshHostAlias.canonical(input, 22), SshHostAlias.canonical(expected, 22))
+        }
+    }
+
     @Test
     fun connectionHostUsesTheSameNormalizationAsPinIdentity() {
         assertEquals("xn--bcher-kva.example", SshHostAlias.canonicalHost("  BÜCHER.example.  "))

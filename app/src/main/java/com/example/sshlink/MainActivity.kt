@@ -41,9 +41,16 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingStartAfterNotificationPermission =
+            savedInstanceState?.getBoolean(STATE_PENDING_NOTIFICATION_START) ?: false
         settings = SettingsRepository(this)
         keys = OpenSshEd25519KeyManager(this)
         setContentView(buildUi())
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(STATE_PENDING_NOTIFICATION_START, pendingStartAfterNotificationPermission)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
@@ -75,9 +82,16 @@ class MainActivity : Activity() {
         statusView = TextView(this).apply { textSize = 18f; setPadding(0, dp(14), 0, dp(6)) }
         targetView = TextView(this).apply { textSize = 15f; setPadding(0, 0, 0, dp(8)) }
         forwardsView = TextView(this).apply { textSize = 14f; setPadding(0, 0, 0, dp(12)) }
-        root.addView(statusView)
-        root.addView(targetView)
-        root.addView(forwardsView)
+        val connectionDetails = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(statusView)
+            addView(targetView)
+            addView(forwardsView)
+        }
+        // Share the available space with the log, keeping the controls outside
+        // both scrolling areas even with many forwards or large system fonts.
+        root.addView(ScrollView(this).apply { addView(connectionDetails) },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         root.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -259,5 +273,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_NOTIFICATIONS = 200
+        private const val STATE_PENDING_NOTIFICATION_START = "state.pendingNotificationStart"
     }
 }

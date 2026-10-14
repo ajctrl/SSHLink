@@ -6,18 +6,17 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Typeface
-import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import java.io.ByteArrayOutputStream
 
 class SettingsActivity : Activity() {
     private lateinit var settings: SettingsRepository
@@ -37,6 +36,32 @@ class SettingsActivity : Activity() {
     private val forwardRows = mutableListOf<ForwardRow>()
     private var configRecoveryMode = false
     private var currentAppSettings = AppSettings()
+    private var backupOperation: SettingsBackupOperation? = null
+    private var started = false
+    private lateinit var contentView: View
+    private lateinit var backupStatusView: TextView
+
+    override fun onStart() {
+        super.onStart()
+        started = true
+        backupOperation?.attach(::finishBackup)
+    }
+
+    override fun onStop() {
+        started = false
+        backupOperation?.detach()
+        if (isFinishing) backupOperation?.cancelImport()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        backupOperation?.detach()
+        if (!isChangingConfigurations) backupOperation?.cancelImport()
+        super.onDestroy()
+    }
+
+    @Deprecated("Retain the backup worker without introducing AndroidX dependencies")
+    override fun onRetainNonConfigurationInstance(): Any? = backupOperation
 
     override fun onResume() {
         super.onResume()
@@ -47,8 +72,15 @@ class SettingsActivity : Activity() {
         super.onCreate(savedInstanceState)
         settings = SettingsRepository(this)
         keys = OpenSshEd25519KeyManager(this)
-        setContentView(buildUi())
-        if (savedInstanceState != null) {
+        contentView = buildUi()
+        setContentView(contentView)
+        backupOperation = lastNonConfigurationInstance as? SettingsBackupOperation
+        // A retained worker delivers its result after rotation. After process
+        // death it no longer exists, and its import may already be on disk.
+        // Reload storage rather than reviving a draft from before that import.
+        val lostImport = backupOperation == null &&
+            savedInstanceState?.getBoolean(STATE_IMPORT_PENDING) == true
+        if (savedInstanceState != null && !lostImport) {
             restoreUiState(savedInstanceState)
             setConfigRecoveryMode(savedInstanceState.getBoolean(STATE_CONFIG_RECOVERY_MODE))
         } else {
@@ -61,6 +93,7 @@ class SettingsActivity : Activity() {
                 showCorruptConfigDialog()
             }
         }
+        setBackupBusy(backupOperation != null)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -83,6 +116,7 @@ class SettingsActivity : Activity() {
         )
         outState.putInt(STATE_LOG_LIMIT, currentAppSettings.logLimit)
         outState.putBoolean(STATE_CONFIG_RECOVERY_MODE, configRecoveryMode)
+        outState.putBoolean(STATE_IMPORT_PENDING, backupOperation?.isImport == true)
         super.onSaveInstanceState(outState)
     }
 
@@ -173,6 +207,11 @@ class SettingsActivity : Activity() {
         })
 
         content.addView(title("Backup"))
+        backupStatusView = TextView(this).apply {
+            text = "Backup in progress..."
+            visibility = View.GONE
+        }
+        content.addView(backupStatusView)
         content.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             exportButton = Button(this@SettingsActivity).apply {
@@ -240,8 +279,8 @@ class SettingsActivity : Activity() {
 
     private fun setConfigRecoveryMode(enabled: Boolean) {
         configRecoveryMode = enabled
-        saveButton.isEnabled = !enabled
-        exportButton.isEnabled = !enabled
+        saveButton.isEnabled = !enabled && backupOperation == null
+        exportButton.isEnabled = !enabled && backupOperation == null
     }
 
     private fun showCorruptConfigDialog() {
@@ -487,57 +526,75 @@ class SettingsActivity : Activity() {
     @Deprecated("Legacy Activity result API keeps this project dependency-free from AndroidX")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK || requestCode !in setOf(REQUEST_EXPORT, REQUEST_IMPORT)) return
+        if (backupOperation != null) return
         val uri = data?.data ?: return
-        try {
-            when (requestCode) {
-                REQUEST_EXPORT -> writeUri(uri, settings.exportJson())
-                REQUEST_IMPORT -> {
-                    val imported = settings.importJson(readUri(uri))
-                    loadIntoUi(imported)
-                    setConfigRecoveryMode(false)
-                    TunnelState.log("INFO", "Settings imported")
-                    TunnelService.reconnect(this)
-                    if (imported.hasMeaningfulSettings()) {
-                        AlertDialog.Builder(this)
-                            .setTitle("SSH key regeneration required")
-                            .setMessage("The backup does not contain the private key. Regenerate the SSH key in Settings, then install the new public key on the SSH server.")
-                            .setPositiveButton("OK", null)
-                            .show()
-                    }
-                }
-            }
-            Toast.makeText(this, if (requestCode == REQUEST_EXPORT) "Exported" else "Imported", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
+        val operation = SettingsBackupOperation(applicationContext, uri, requestCode == REQUEST_IMPORT)
+        backupOperation = operation
+        setBackupBusy(true)
+        if (started) operation.attach(::finishBackup)
+        operation.start()
+    }
+
+    private fun finishBackup(result: Result<SettingsBackupOperation.Outcome>) {
+        backupOperation?.detach()
+        backupOperation = null
+        if (isFinishing || isDestroyed) return
+        setBackupBusy(false)
+        val outcome = result.getOrElse { e ->
+            if (e is ConfigStore.ConcurrentUpdateException && reloadSavedSettingsAfterImport() == null) return
             AlertDialog.Builder(this)
-                .setTitle("Backup error")
+                .setTitle(if (e is ConfigStore.ConcurrentUpdateException) "Import not applied" else "Backup error")
                 .setMessage(e.message ?: e.toString())
                 .setPositiveButton("OK", null)
                 .show()
+            return
         }
-    }
-
-    private fun writeUri(uri: Uri, text: String) {
-        contentResolver.openOutputStream(uri, "wt")!!.bufferedWriter(Charsets.UTF_8).use { it.write(text) }
-    }
-
-    private fun readUri(uri: Uri): String {
-        val input = contentResolver.openInputStream(uri) ?: error("Could not open import file")
-        return input.buffered().use { stream ->
-            val output = ByteArrayOutputStream()
-            val buffer = ByteArray(8192)
-            var total = 0
-            while (true) {
-                val read = stream.read(buffer)
-                if (read < 0) break
-                total += read
-                if (total > ConfigLimits.MAX_IMPORT_BYTES) {
-                    throw IllegalArgumentException("Import exceeds ${ConfigLimits.MAX_IMPORT_BYTES} bytes")
-                }
-                output.write(buffer, 0, read)
+        // A completed import may have waited while this screen was stopped and
+        // another screen saved. Never revive the worker's old config snapshot.
+        val imported = if (outcome.imported != null) reloadSavedSettingsAfterImport() ?: return else null
+        if (imported != null) {
+            val warnings = mutableListOf<String>()
+            if (imported.hasMeaningfulSettings() && !keys.validatePrivateKey()) {
+                warnings += "No valid private key is available on this device. The backup does not contain one. Generate or regenerate the SSH key in Settings, then install the new public key on the SSH server."
             }
-            output.toString(Charsets.UTF_8.name())
+            outcome.reconnectError?.let {
+                warnings += "Settings were imported and saved, but the tunnel could not restart. Return to the main screen and press Start to retry. ${it.message.orEmpty()}"
+            }
+            if (warnings.isNotEmpty()) {
+                AlertDialog.Builder(this)
+                    .setTitle(if (outcome.reconnectError != null) "Imported; reconnect required" else "SSH key regeneration required")
+                    .setMessage(warnings.joinToString("\n\n"))
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
         }
+        Toast.makeText(this, if (imported == null) "Exported" else "Imported", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun reloadSavedSettingsAfterImport(): AppConfig? {
+        return try {
+            settings.load().also {
+                loadIntoUi(it)
+                setConfigRecoveryMode(false)
+            }
+        } catch (_: ConfigStore.ConfigCorruptedException) {
+            setConfigRecoveryMode(true)
+            showCorruptConfigDialog()
+            null
+        }
+    }
+
+    private fun setBackupBusy(busy: Boolean) {
+        fun setEnabled(view: View) {
+            view.isEnabled = !busy
+            if (view is ViewGroup) {
+                for (index in 0 until view.childCount) setEnabled(view.getChildAt(index))
+            }
+        }
+        setEnabled(contentView)
+        backupStatusView.visibility = if (busy) View.VISIBLE else View.GONE
+        setConfigRecoveryMode(configRecoveryMode)
     }
 
     private fun title(text: String) = TextView(this).apply {
@@ -575,5 +632,6 @@ class SettingsActivity : Activity() {
         private const val STATE_FORWARD_DESTINATIONS = "state.forwardDestinations"
         private const val STATE_LOG_LIMIT = "state.logLimit"
         private const val STATE_CONFIG_RECOVERY_MODE = "state.configRecoveryMode"
+        private const val STATE_IMPORT_PENDING = "state.importPending"
     }
 }

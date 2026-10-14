@@ -13,7 +13,9 @@ import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.ScreenAwareSession
@@ -25,6 +27,9 @@ class TunnelService : Service() {
     private val executor = Executors.newSingleThreadScheduledExecutor()
     private val connectionExecutor = Executors.newCachedThreadPool()
     private val lock = Any()
+    private val main = Handler(Looper.getMainLooper())
+    private var commandEpoch = 0L
+    private var latestStartId = 0
     private lateinit var settings: SettingsRepository
     private lateinit var keys: OpenSshEd25519KeyManager
     private lateinit var connectivity: ConnectivityManager
@@ -101,16 +106,23 @@ class TunnelService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Promote before waiting for connection cleanup or reading persisted state.
+        // Failure shutdown also runs on main, so it cannot remove foreground
+        // status while this command is being handled.
+        if (intent?.action != ACTION_STOP) startForeground(NOTIFICATION_ID, buildNotification())
+        return handleCommand(intent, startId)
+    }
+
+    private fun handleCommand(intent: Intent?, startId: Int): Int = synchronized(lock) {
+        // Registering callbacks and clearing retry blocks belong to the same
+        // transition as the new connection generation.
+        commandEpoch += 1
+        latestStartId = startId
         val action = intent?.action
         if (action == ACTION_STOP) {
             stopTunnel(clearDesired = true)
             return START_NOT_STICKY
         }
-
-        // Every path that can be entered through startForegroundService() promotes
-        // immediately, before consulting persisted state. This removes the race
-        // where Stop happens between reconnect() and onStartCommand().
-        startForeground(NOTIFICATION_ID, buildNotification())
 
         when (action) {
             ACTION_START -> {
@@ -353,13 +365,13 @@ class TunnelService : Service() {
             return
         }
 
-        val connectionHost = try {
-            SshHostAlias.canonicalHost(config.ssh.host)
+        val (connectionHost, alias) = try {
+            val host = SshHostAlias.canonicalHost(config.ssh.host)
+            host to SshHostAlias.canonical(host, config.ssh.port)
         } catch (e: Exception) {
             terminalFailure(gen, "Invalid SSH host: ${e.message}")
             return
         }
-        val alias = SshHostAlias.canonical(connectionHost, config.ssh.port)
 
         synchronized(lock) {
             if (!isCurrent(gen)) return
@@ -525,8 +537,7 @@ class TunnelService : Service() {
         monitorFuture?.cancel(true)
         monitorFuture = null
         releaseWakeLock()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        stopAfterFailure()
     }
 
     private fun terminalFailure(gen: Long, message: String, logLimit: Int = 500): Unit = synchronized(lock) {
@@ -550,8 +561,24 @@ class TunnelService : Service() {
         releaseWakeLock()
         // Keep the persisted "desired" flag so saving settings or pressing Start
         // can explicitly clear the retry block, but do not keep an idle FGS alive.
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        stopAfterFailure()
+    }
+
+    /** Called under lock. Lifecycle shutdown must not overtake a newer command. */
+    private fun stopAfterFailure() {
+        val epoch = commandEpoch
+        val startId = latestStartId
+        val stop = Runnable {
+            synchronized(lock) {
+                if (!destroyed && runtimeRetryBlocked && commandEpoch == epoch) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf(startId)
+                }
+            }
+        }
+        // onStartCommand runs on main. A worker queues shutdown so a command
+        // already being delivered gets to finish before we check its epoch.
+        if (Looper.myLooper() == Looper.getMainLooper()) stop.run() else main.post(stop)
     }
 
     private fun stopTunnel(clearDesired: Boolean): Unit = synchronized(lock) {

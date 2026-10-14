@@ -95,20 +95,20 @@ data class AppConfig(
 
     companion object {
         fun fromJson(obj: JSONObject): AppConfig {
-            val schema = obj.optInt("schemaVersion", 1)
+            val schema = obj.integer("schemaVersion", 1)
             require(schema == 1) { "Unsupported schemaVersion: $schema" }
 
-            val sshObj = obj.optJSONObject("ssh") ?: JSONObject()
+            val sshObj = if (obj.has("ssh")) obj.getJSONObject("ssh") else JSONObject()
             val ssh = SshConfig(
-                host = sshObj.optString("host", ""),
-                port = sshObj.optInt("port", 22),
-                username = sshObj.optString("username", ""),
-                keyId = sshObj.optString("keyId", "default"),
-                keepAliveIntervalSec = sshObj.optInt("keepAliveIntervalSec", 120),
-                keepAliveCountMax = sshObj.optInt("keepAliveCountMax", 3),
+                host = sshObj.string("host", ""),
+                port = sshObj.integer("port", 22),
+                username = sshObj.string("username", ""),
+                keyId = sshObj.string("keyId", "default"),
+                keepAliveIntervalSec = sshObj.integer("keepAliveIntervalSec", 120),
+                keepAliveCountMax = sshObj.integer("keepAliveCountMax", 3),
             )
 
-            val forwardsArray = obj.optJSONArray("forwards") ?: JSONArray()
+            val forwardsArray = if (obj.has("forwards")) obj.getJSONArray("forwards") else JSONArray()
             require(forwardsArray.length() <= ConfigLimits.MAX_FORWARDS) {
                 "Too many forwards (max ${ConfigLimits.MAX_FORWARDS})"
             }
@@ -117,22 +117,42 @@ data class AppConfig(
                     val f = forwardsArray.getJSONObject(i)
                     add(
                         ForwardConfig(
-                            localPort = f.getInt("localPort"),
-                            remoteHost = f.getString("remoteHost"),
-                            remotePort = f.getInt("remotePort"),
-                            name = f.optString("name", ""),
+                            localPort = f.integer("localPort"),
+                            remoteHost = f.string("remoteHost"),
+                            remotePort = f.integer("remotePort"),
+                            name = f.string("name", ""),
                         )
                     )
                 }
             }
 
-            val appObj = obj.optJSONObject("app") ?: JSONObject()
+            val appObj = if (obj.has("app")) obj.getJSONObject("app") else JSONObject()
             return AppConfig(
                 schemaVersion = schema,
                 ssh = ssh,
                 forwards = forwards,
-                app = AppSettings(logLimit = appObj.optInt("logLimit", 500)),
+                app = AppSettings(logLimit = appObj.integer("logLimit", 500)),
             )
+        }
+
+        // Defaults apply only to absent fields. Never coerce malformed backup
+        // values or silently replace them with defaults before saving the file.
+        private fun JSONObject.string(name: String, default: String? = null): String {
+            if (!has(name) && default != null) return default
+            val value = get(name)
+            require(value is String) { "$name must be a string" }
+            return value
+        }
+
+        private fun JSONObject.integer(name: String, default: Int? = null): Int {
+            if (!has(name) && default != null) return default
+            val value = get(name)
+            require(value is Int || value is Long) { "$name must be an integer" }
+            val number = (value as Number).toLong()
+            require(number in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
+                "$name is outside the supported integer range"
+            }
+            return number.toInt()
         }
     }
 }

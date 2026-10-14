@@ -3,7 +3,14 @@ package com.jcraft.jsch;
 import java.io.ByteArrayInputStream;
 import java.lang.reflect.Field;
 import java.net.Socket;
+import java.net.ServerSocket;
+import java.net.InetAddress;
 import java.io.IOException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -19,6 +26,68 @@ public class ScreenAwareSessionTest {
         assertThrows(IOException.class, () -> session.trackSocket(late));
         assertTrue(late.isClosed());
         assertThrows(JSchException.class, () -> session.connect(100));
+        assertThrows(JSchException.class,
+                () -> session.setPortForwardingL("127.0.0.1", 0, "localhost", 22));
+    }
+
+    @Test public void disconnectRemovesListenersEvenWhenSessionIsNotConnected() throws Exception {
+        ScreenAwareSession session = session();
+        session.setDaemonThread(true);
+        try {
+            int port = session.setPortForwardingL("127.0.0.1", 0, "localhost", 22);
+            session.disconnect();
+            assertEquals(0, session.getPortForwardingL().length);
+            try (ServerSocket rebound = new ServerSocket(port, 0, InetAddress.getByName("127.0.0.1"))) {
+                assertEquals(port, rebound.getLocalPort());
+            }
+        } finally {
+            session.disconnect();
+        }
+    }
+
+    @Test public void retirementDuringListenerCreationReleasesThePort() throws Exception {
+        ScreenAwareSession session = session();
+        session.setDaemonThread(true);
+        CountDownLatch creating = new CountDownLatch(1);
+        CountDownLatch finishCreation = new CountDownLatch(1);
+        CountDownLatch transportClosed = new CountDownLatch(1);
+        session.trackSocket(new Socket() {
+            @Override public synchronized void close() throws IOException {
+                super.close();
+                transportClosed.countDown();
+            }
+        });
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<Integer> forwarding = workers.submit(() -> session.setPortForwardingL(
+                    "127.0.0.1", 0, "localhost", 22, (port, backlog, address) -> {
+                        creating.countDown();
+                        try {
+                            if (!finishCreation.await(5, TimeUnit.SECONDS)) {
+                                throw new IOException("Listener creation was not released");
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException(e);
+                        }
+                        return new ServerSocket(port, backlog, address);
+                    }, 0));
+            assertTrue(creating.await(5, TimeUnit.SECONDS));
+            Future<?> retirement = workers.submit(session::disconnect);
+            assertTrue(transportClosed.await(5, TimeUnit.SECONDS));
+            finishCreation.countDown();
+            int port = forwarding.get(5, TimeUnit.SECONDS);
+            retirement.get(5, TimeUnit.SECONDS);
+            assertEquals(0, session.getPortForwardingL().length);
+            try (ServerSocket rebound = new ServerSocket(port, 0, InetAddress.getByName("127.0.0.1"))) {
+                assertEquals(port, rebound.getLocalPort());
+            }
+        } finally {
+            finishCreation.countDown();
+            workers.shutdownNow();
+            workers.awaitTermination(5, TimeUnit.SECONDS);
+            session.disconnect();
+        }
     }
     private ScreenAwareSession session() throws Exception {
         return new ScreenAwareSession(new JSch(), "test", "localhost", 22);

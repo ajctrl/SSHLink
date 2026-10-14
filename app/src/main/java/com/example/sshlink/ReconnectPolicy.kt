@@ -1,5 +1,7 @@
 package com.example.sshlink
 
+import android.system.ErrnoException
+import android.system.OsConstants
 import java.io.EOFException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
@@ -35,6 +37,12 @@ object ReconnectPolicy {
 
                 is SocketException -> {
                     terminalMessage(current.message)?.let { return FailureKind.TERMINAL }
+                    // Network.bindSocket wraps ENONET when its network disappears
+                    // after DNS resolution. Its text is platform dependent.
+                    val errno = (current.cause as? ErrnoException)?.errno
+                    // The ENONET field became public at API 31; errnoName is
+                    // available on every supported API and avoids a numeric errno.
+                    if (errno != null && OsConstants.errnoName(errno) == "ENONET") return FailureKind.RETRYABLE
                     retryableMessage(current.message)?.let { return FailureKind.RETRYABLE }
                     return FailureKind.TERMINAL
                 }
@@ -66,6 +74,9 @@ object ReconnectPolicy {
             "remote host closed",
             "session is down",
             "end of file",
+            // JSch IO.getByte reports an orderly peer close as IOException,
+            // rather than EOFException, while reading handshake packets.
+            "end of io stream read",
             "unexpected eof",
             "temporary failure in name resolution",
             "name or service not known",

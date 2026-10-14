@@ -5,15 +5,17 @@ import java.io.IOException;
 import java.net.Socket;
 
 /**
- * Narrow adapter for JSch 2.28.7's package-private packet reader. A successful
- * socket write is not a liveness check: both SSH global-request success and
- * failure replies prove that the authenticated server has responded.
+ * Narrow adapter for JSch 2.28.7's package-private packet reader and listener
+ * cleanup. Retirement prevents new listeners and releases any being created.
+ * A successful socket write is not a liveness check: both SSH global-request
+ * success and failure replies prove that the authenticated server has responded.
  * Keep this adapter covered when upgrading JSch.
  */
 public class ScreenAwareSession extends Session {
     private volatile boolean maintenanceEnabled = true;
     private final AtomicReference<Runnable> probeReply = new AtomicReference<>();
     private final AtomicReference<Socket> transport = new AtomicReference<>();
+    private final Object forwardingLock = new Object();
     private volatile boolean retired;
 
     public ScreenAwareSession(JSch jsch, String username, String host, int port)
@@ -45,7 +47,22 @@ public class ScreenAwareSession extends Session {
         if (socket != null) {
             try { socket.close(); } catch (IOException ignored) { }
         }
+        synchronized (forwardingLock) {
+            // Session.disconnect() returns early when already disconnected. A
+            // listener created concurrently with retirement still needs cleanup.
+            PortWatcher.delPort(this);
+        }
         super.disconnect();
+    }
+
+    @Override
+    public int setPortForwardingL(String bindAddress, int localPort, String host, int remotePort,
+            ServerSocketFactory factory, int connectTimeout) throws JSchException {
+        synchronized (forwardingLock) {
+            if (retired) throw new JSchException("Session was retired");
+            return super.setPortForwardingL(
+                    bindAddress, localPort, host, remotePort, factory, connectTimeout);
+        }
     }
 
     public void pauseMaintenance() throws JSchException {
