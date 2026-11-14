@@ -121,7 +121,7 @@ android {
 
 dependencies {
     implementation("com.github.mwiede:jsch:2.28.8")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.87")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20260814")
