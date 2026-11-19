@@ -32,6 +32,7 @@ class FakeGitHub:
         ]
         self.tags = [{"name": "v0.3.10", "commit": {"sha": "old"}}]
         self.writes = []
+        self.comments = []
         self.merge_allowed = True
         self.tag_collision = False
         self.dispatch_failure = False
@@ -51,6 +52,9 @@ class FakeGitHub:
                     b'val defaultVersionName = "0.3.11"\n'
                 ).decode()}
         self.writes.append((method, path, data))
+        if method == "POST" and path == "/issues/42/comments":
+            self.comments.append({"user": {"login": "github-actions[bot]"}, "body": data["body"]})
+            return {}
         if method == "PUT" and path == "/pulls/42/merge":
             if not self.merge_allowed:
                 raise HTTPError(path, 405, "Branch protection", {}, BytesIO())
@@ -74,12 +78,50 @@ class FakeGitHub:
         return deepcopy({
             "/commits/tested/pulls": [{"number": 42}],
             "/pulls/42/files": self.files,
+            "/issues/42/comments": self.comments,
             "/actions/runs/7/jobs?filter=latest": self.jobs,
             "/tags": self.tags,
         }[path])
 
 
 class DependencyReleaseTest(unittest.TestCase):
+    def test_wrapper_with_skipped_reproducibility_job_is_not_ready(self):
+        api = FakeGitHub()
+        api.files = [{"filename": "gradlew", "status": "modified"}]
+        api.jobs[-1]["conclusion"] = "skipped"
+        with self.assertRaisesRegex(ValueError, "reproducibility"):
+            release(api, REPOSITORY, 7, True)
+        self.assertEqual(api.writes, [])
+
+    def test_mixed_dependency_and_wrapper_update_only_requests_review(self):
+        api = FakeGitHub()
+        api.files.append({"filename": "gradle/wrapper/gradle-wrapper.properties", "status": "modified"})
+        release(api, REPOSITORY, 7, True)
+        self.assertEqual([w[:2] for w in api.writes], [("POST", "/issues/42/comments")])
+        self.assertIn("手動", api.comments[0]["body"])
+
+    def test_ci_failure_then_wrapper_success_notifies_once_per_reason(self):
+        api = FakeGitHub()
+        api.files = [{"filename": "gradle/wrapper/gradle-wrapper.properties", "status": "modified"}]
+        for conclusion in ("failure", "timed_out", "success", "success"):
+            api.run["conclusion"] = conclusion
+            release(api, REPOSITORY, 7, True, conclusion)
+        self.assertEqual([w[:2] for w in api.writes], [("POST", "/issues/42/comments")] * 2)
+        for comment in api.comments:
+            self.assertIn("@ajctrl", comment["body"])
+            self.assertIn("/actions/runs/7", comment["body"])
+        self.assertIn("CIが失敗", api.comments[0]["body"])
+        self.assertIn("手動", api.comments[1]["body"])
+
+    def test_failed_run_does_not_notify_merged_or_outdated_pr(self):
+        for fields in ({"state": "closed", "merged": True},
+                       {"head": {"repo": {"full_name": REPOSITORY}, "sha": "newer"}}):
+            api = FakeGitHub()
+            api.run["conclusion"] = "failure"
+            api.pr.update(fields)
+            release(api, REPOSITORY, 7, True, "failure")
+            self.assertEqual(api.writes, [])
+
     def test_success_tags_exact_merge_and_dispatches(self):
         api = FakeGitHub()
         release(api, REPOSITORY, "7", True)

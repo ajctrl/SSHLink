@@ -14,6 +14,10 @@ from urllib.request import Request, urlopen
 
 
 ALLOWED_FILES = {"app/build.gradle.kts", "build.gradle.kts"}
+WRAPPER_FILES = {
+    "gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar",
+    "gradle/wrapper/gradle-wrapper.properties",
+}
 REQUIRED_JOBS = {"Build, test and lint", "Independent reproducibility build"}
 VERSION = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 
@@ -74,7 +78,16 @@ def next_tag(tags, default_version):
     return f"v{major}.{minor}.{patch}"
 
 
-def release(api, repository, run_id, signing_ready):
+def notify_once(api, number, reason, message):
+    path = f"/issues/{number}/comments"
+    marker = f"<!-- sshlink-dependency-notice:{reason} -->"
+    if any(comment["user"]["login"] == "github-actions[bot]" and marker in comment["body"]
+           for comment in api.items(path)):
+        return
+    api.request("POST", path, {"body": f"@ajctrl {message}\n\n{marker}"})
+
+
+def release(api, repository, run_id, signing_ready, conclusion="success"):
     if not str(run_id).isdigit():
         raise ValueError("BUILD_RUN_ID must be a numeric Build APK run ID")
     run = api.request("GET", f"/actions/runs/{run_id}")
@@ -83,10 +96,11 @@ def release(api, repository, run_id, signing_ready):
         run["workflow_id"] == workflow["id"]
         and run["event"] == "pull_request"
         and run["status"] == "completed"
-        and run["conclusion"] == "success"
+        and run["conclusion"] == conclusion
+        and conclusion in {"success", "failure", "timed_out"}
         and run["head_repository"]["full_name"] == repository
     ):
-        raise ValueError("Expected a successful Build APK pull request run in this repository")
+        raise ValueError("Expected a matching completed Build APK pull request run in this repository")
 
     repo = api.request("GET", "")
     # workflow_run.pull_requests can be empty; resolve through the tested head SHA.
@@ -113,15 +127,23 @@ def release(api, repository, run_id, signing_ready):
         raise ValueError("Expected exactly one Dependabot PR for the tested commit")
     pr = eligible[0]
     number = pr["number"]
+    run_url = f"https://github.com/{repository}/actions/runs/{run_id}"
+    if conclusion != "success":
+        if pr["state"] == "open":
+            notify_once(api, number, "ci", f"CIが失敗したため、自動マージが停止しました。[実行ログ]({run_url})")
+        return
     files = list(api.items(f"/pulls/{number}/files"))
-    if not files or any(
-        f["filename"] not in ALLOWED_FILES or f["status"] != "modified" for f in files
-    ):
+    filenames = {f["filename"] for f in files}
+    if not filenames or filenames - ALLOWED_FILES - WRAPPER_FILES or any(f["status"] != "modified" for f in files):
         raise ValueError("Automatic releases only accept existing Gradle dependency files")
     jobs = list(api.items(f"/actions/runs/{run_id}/jobs?filter=latest", key="jobs"))
     passed = {job["name"] for job in jobs if job["conclusion"] == "success"}
     if not REQUIRED_JOBS <= passed:
         raise ValueError("Tests, lint and both reproducibility builds must succeed")
+    if filenames & WRAPPER_FILES:
+        if pr["state"] == "open":
+            notify_once(api, number, "wrapper", f"Gradle Wrapper更新のCIが成功しました。手動でレビュー・マージしてください。[実行ログ]({run_url})")
+        return
     if not signing_ready:
         raise ValueError("Configure all four SIGNING_* secrets before automatically merging")
 
@@ -185,4 +207,5 @@ if __name__ == "__main__":
         os.environ["GITHUB_REPOSITORY"],
         os.environ["BUILD_RUN_ID"],
         os.environ.get("SIGNING_READY") == "true",
+        os.environ.get("BUILD_CONCLUSION", "success"),
     )
