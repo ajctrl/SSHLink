@@ -16,6 +16,7 @@ updates:
         patterns: ['junit:*', 'org.json:*', 'org.robolectric:*']
       app-libraries:
         patterns: ['*']
+        exclude-patterns: ['gradle-wrapper']
       gradle-security:
         applies-to: security-updates
         patterns: ['*']

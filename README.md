@@ -201,8 +201,10 @@ update requiring a newer Gradle version therefore does not block application
 library updates. Successful updates are queued for sequential merging and tagging.
 Security updates have a separate group; enable Dependabot security updates in
 the repository settings to receive them between scheduled version checks.
-The custom Gradle bootstrap, Java, Android SDK and GitHub Actions versions are
-not managed by this configuration.
+The standard Gradle Wrapper pins the distribution version and SHA-256 in
+`gradle/wrapper/gradle-wrapper.properties`. Wrapper changes require manual
+review under the current automatic release rules. Java, Android SDK and GitHub
+Actions versions are managed separately.
 
 After **Build APK** passes unit tests, lint, automation tests and the independent
 APK reproducibility check, **Release dependency updates** automatically:
